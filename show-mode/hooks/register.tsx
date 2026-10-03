@@ -18,8 +18,10 @@ const processRows = atom(
 const pending = new Map<string, Map<string, string>>()
 const loopKey = (agentId?: string) => agentId ?? 'main'
 
-const DIFF_LIMIT = 50
-const THOUGHT_LIMIT = 50
+const DIFF_LIMIT = 100
+const THOUGHT_LIMIT = 100
+const VIEW_LIMIT = 10
+const VIEW_ALL_LIMIT = 30
 const THOUGHT_LINE_LIMIT = 5
 const ROW_LIMIT = 2000
 
@@ -122,7 +124,7 @@ const collectDiffs = (tool: string, output: unknown): DiffEntry[] => {
   return []
 }
 
-// 每次文件更新独立记录，最多保留最近 50 条。
+// 每次文件更新独立记录，最多保留最近 100 条，超出时删除最旧记录。
 const storeDiffs = async ($: EngineInterface, entries: DiffEntry[]) => {
   if (entries.length === 0) return
   try {
@@ -213,6 +215,7 @@ const formatToolCall = (e: ToolCallInput) => {
   return `${e.tool}\n${args.join('\n')}`
 }
 
+// think 同样最多保存最近 100 条，工具/技能调用计入这一上限。
 const storeThoughts = async (
   $: EngineInterface,
   kind: StoredThought['kind'],
@@ -283,15 +286,16 @@ export const register: Register = (on, options) => {
     pending.clear()
     await $.command.register({
       name: 'show-mode',
-      description: '切换过程显示，回看 hidden 模式保存的文件 diff 和思考过程',
-      argumentHint: '[off|hidden|status|view [code|think]]',
+      description: '切换过程显示，回看或清空 hidden 模式保存的文件 diff 和思考过程',
+      argumentHint: '[off|hidden|status|view [code|think|all|clear]]',
     })
 
     return next(e)
   })
 
   // /show-mode：
-  // - view：回看全部记录；view code / view think：分别查看文件 diff / 思考过程
+  // - view：两类各最近 10 条；view code / view think：查看对应类型最近 10 条
+  // - view all：两类各最近 30 条；view clear：清空两类保存记录
   // - 无参数在 off 和 hidden 之间切换；带参数直接切换
   on('command.run', { command: 'show-mode' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
@@ -299,11 +303,18 @@ export const register: Register = (on, options) => {
     // 回看不受当前显示模式限制，off 仍可以查看之前保存的记录。
     if (arg === 'view' || arg.startsWith('view ')) {
       const rest = arg.slice(4).trim()
-      if (rest !== '' && rest !== 'code' && rest !== 'think') {
-        return { text: '用法：/show-mode view [code|think]；不传参数查看全部' }
+      if (rest === 'clear') {
+        await update($, diffs, () => [])
+        await update($, thoughts, () => [])
+        return { text: 'show-mode：已清空全部文件更新 diff 和 think 记录' }
       }
-      const files = rest === 'think' ? [] : (await read($, diffs)) ?? []
-      const thinking = rest === 'code' ? [] : (await read($, thoughts)) ?? []
+      if (!['', 'code', 'think', 'all'].includes(rest)) {
+        return { text: '用法：/show-mode view [code|think|all|clear]；默认每类最近 10 条，all 每类最近 30 条，clear 清空全部记录' }
+      }
+      const limit = rest === 'all' ? VIEW_ALL_LIMIT : VIEW_LIMIT
+      // 先取最近记录再格式化，避免为未展示的历史 diff 创建大字符串。
+      const files = rest === 'think' ? [] : ((await read($, diffs)) ?? []).slice(-limit)
+      const thinking = rest === 'code' ? [] : ((await read($, thoughts)) ?? []).slice(-limit)
       const records = [
         ...files.map((entry) => ({ kind: 'code', at: entry.at, text: formatEntry(entry) })),
         ...thinking.map((entry) => ({ kind: 'think', at: entry.at, text: formatThought(entry) })),
@@ -320,13 +331,13 @@ export const register: Register = (on, options) => {
       const content = records.map((entry) =>
         `${entry.kind === 'code' ? '\n\n\n' : '\n\n'}${entry.text.replace(/\n+$/, '')}`,
       ).join('')
-      return { text: `show-mode 保存的记录（${counts}）：${content}` }
+      return { text: `show-mode 最近的记录（${counts}；每类最多 ${limit} 条）：${content}` }
     }
 
     const current = parseMode((await read($, mode)) ?? '') ?? configured
     const wanted = parseMode(arg)
     if (arg !== '' && arg !== 'status' && wanted === null) {
-      return { text: '用法：/show-mode [off|hidden|status|view [code|think]]' }
+      return { text: '用法：/show-mode [off|hidden|status|view [code|think|all|clear]]' }
     }
     const picked = arg === 'status'
       ? current
@@ -350,12 +361,12 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // 三种 view 共用无缩进的布局，以显式行间距保留块间空白。
+  // view / view code / view think / view all 共用无缩进的布局和块间空白。
   // 用原生 Text 着色；命令输出的存档和复制内容不包含 ANSI 控制字符。
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
     const arg = e.props.args.trim().toLowerCase()
     const isView = arg === 'view'
-      || (arg.startsWith('view ') && ['code', 'think'].includes(arg.slice(4).trim()))
+      || (arg.startsWith('view ') && ['code', 'think', 'all'].includes(arg.slice(4).trim()))
     if (e.props.command !== 'show-mode' || e.props.isErrored
       || !isView
       || !/(?:^|\n)── (?:code|think) #\d+ ── /.test(e.props.text)) return next(e)
