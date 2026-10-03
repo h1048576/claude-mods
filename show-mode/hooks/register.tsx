@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, TextProps, ToolCallInput, ToolResultOf } from 'claude-code'
 
-import type { ShowMode, StoredDiff, StoredThought } from '../types'
+import type { LiveThought, ShowMode, StoredDiff, StoredThought } from '../types'
 
 // 运行时模式：存 $.state；null 表示"未设置"，读时回落到清单配置值。
 const mode = atom({ plugin: 'show-mode', key: 'mode' } as const, null as ShowMode | null)
@@ -9,6 +9,7 @@ const mode = atom({ plugin: 'show-mode', key: 'mode' } as const, null as ShowMod
 // hidden 模式下保存文件 diff 和思考过程，off 不新增记录。
 const diffs = atom({ plugin: 'show-mode', key: 'diffs' } as const, [] as StoredDiff[])
 const thoughts = atom({ plugin: 'show-mode', key: 'thoughts' } as const, [] as StoredThought[])
+const liveThought = atom({ plugin: 'show-mode', key: 'liveThought' } as const, null as LiveThought | null)
 const processRows = atom(
   { plugin: 'show-mode', key: 'processRows' } as const,
   {} as Record<string, boolean>,
@@ -37,7 +38,7 @@ const MODES: readonly ShowMode[] = ['off', 'hidden']
 
 const MODE_LABEL: Record<ShowMode, string> = {
   off: '正常显示',
-  hidden: '完全隐藏',
+  hidden: '仅展示当前思考',
 }
 
 const parseMode = (text: string): ShowMode | null => {
@@ -200,6 +201,29 @@ const limitThought = (text: string) => {
   return kept.join('\n')
 }
 
+const showThought = async ($: EngineInterface, kind: LiveThought['kind'], text: string, agentId?: string) => {
+  if (text.trim() === '' || (parseMode((await read($, mode)) ?? '') ?? configured) !== 'hidden') return
+  const visible = limitThought(text)
+  await update($, liveThought, (previous) =>
+    previous?.kind === kind && previous.agentId === agentId && previous.text === visible
+      ? previous : { kind, text: visible, ...(agentId === undefined ? {} : { agentId }) })
+}
+
+// 尚未跟随工具调用的正文是最终回答候选，结束/切换模式时恢复其原生显示。
+const releasePending = async ($: EngineInterface, key?: string) => {
+  const ids = key === undefined
+    ? [...pending.values()].flatMap((rows) => [...rows.keys()])
+    : [...(pending.get(key)?.keys() ?? [])]
+  if (key === undefined) pending.clear()
+  else pending.delete(key)
+  if (ids.length === 0) return
+  await update($, processRows, (known) => {
+    const remaining = { ...known }
+    for (const id of ids) delete remaining[id]
+    return remaining
+  })
+}
+
 const THOUGHT_LABEL: Record<StoredThought['kind'], string> = {
   thinking: '思考',
   narration: '过程叙述',
@@ -283,11 +307,12 @@ export const register: Register = (on, options) => {
 
   // 会话开始：注册 /show-mode 命令
   on('session.start', async ($, e, next) => {
-    pending.clear()
+    await releasePending($)
+    await update($, liveThought, () => null)
     await $.command.register({
       name: 'show-mode',
       description: '切换过程显示，回看或清空 hidden 模式保存的文件 diff 和思考过程',
-      argumentHint: '[off|hidden|status|view [code|think|all|clear]]',
+      argumentHint: 'off|hidden|status|view [code|think|all|clear]',
     })
 
     return next(e)
@@ -296,7 +321,7 @@ export const register: Register = (on, options) => {
   // /show-mode：
   // - view：两类各最近 10 条；view code / view think：查看对应类型最近 10 条
   // - view all：两类各最近 30 条；view clear：清空两类保存记录
-  // - 无参数在 off 和 hidden 之间切换；带参数直接切换
+  // - 只有显式 off / hidden 才切换模式；无参数仅提示用法
   on('command.run', { command: 'show-mode' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
 
@@ -336,15 +361,18 @@ export const register: Register = (on, options) => {
 
     const current = parseMode((await read($, mode)) ?? '') ?? configured
     const wanted = parseMode(arg)
-    if (arg !== '' && arg !== 'status' && wanted === null) {
-      return { text: '用法：/show-mode [off|hidden|status|view [code|think|all|clear]]' }
+    if (arg !== 'status' && wanted === null) {
+      return { text: '用法：/show-mode off|hidden|status|view [code|think|all|clear]；切换模式必须指定 off 或 hidden' }
     }
     const picked = arg === 'status'
       ? current
-      : wanted ?? MODES[(MODES.indexOf(current) + 1) % MODES.length]!
+      : wanted!
 
     if (arg !== 'status') {
-      if (picked !== current) pending.clear()
+      if (picked !== current) {
+        await releasePending($)
+        await update($, liveThought, () => null)
+      }
       await update($, mode, () => picked)
       $.ui.toast(`show-mode: ${picked} (${MODE_LABEL[picked]})`)
     }
@@ -406,7 +434,8 @@ export const register: Register = (on, options) => {
 
   // 新回合不继承上一轮的候选正文，避免把上一轮最终回答隐藏掉。
   on('turn.start', async ($, e, next) => {
-    pending.delete(loopKey())
+    await releasePending($)
+    await update($, liveThought, () => null)
     stats.starts += 1
     return next(e)
   })
@@ -419,7 +448,7 @@ export const register: Register = (on, options) => {
     const key = loopKey(e.agentId)
     const current = parseMode((await read($, mode)) ?? '') ?? configured
     if (current !== 'hidden') {
-      pending.delete(key)
+      await releasePending($, key)
       return next(e)
     }
     const text = e.message.content
@@ -430,6 +459,13 @@ export const register: Register = (on, options) => {
       const rows = pending.get(key) ?? new Map<string, string>()
       rows.set(e.uuid, text)
       pending.set(key, rows)
+      // append 落盘前就隐藏候选行，避免先显示一遍、工具开始后再消失。
+      await update($, processRows, (known) => {
+        const marked = { ...known, [e.uuid]: true }
+        for (const id of Object.keys(marked).slice(0, -ROW_LIMIT)) delete marked[id]
+        return marked
+      })
+      await showThought($, 'narration', text, e.agentId)
     }
     if (e.message.content.some((block) => block.type === 'tool_use')) {
       await markProcess($, e.agentId)
@@ -460,7 +496,7 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  // 只隐藏已识别的过程消息；最终回答继续使用原生 Markdown 渲染。
+  // 过程及候选正文在临时区域显示；回合结束后恢复最终回答的原生渲染。
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     stats.renders += 1
     const current = parseMode((await read($, mode)) ?? '') ?? configured
@@ -472,37 +508,47 @@ export const register: Register = (on, options) => {
     return <Box display="none" />
   })
 
-  // 真正的 thinking 没有独立渲染站点，只缩减其实时显示。
+  // thinking 通过唯一的临时区域显示，下一块替换上一块，步骤结束时保留。
   // text/tool/input/engine/stop 全部按原顺序透传；签名思考仍由引擎保存。
   on('turn.step', async function* ($, e, next) {
     stats.fires += 1
-    const current = parseMode((await read($, mode)) ?? '') ?? configured
     const blocks = new Map<number, string>()
     try {
       for await (const c of next(e)) {
         stats.chunks += 1
         stats.kinds[c.kind] = (stats.kinds[c.kind] ?? 0) + 1
-        if (c.kind === 'thinking' && current === 'hidden') {
-          blocks.set(c.index, (blocks.get(c.index) ?? '') + c.text)
+        if (c.kind === 'thinking') {
+          const current = parseMode((await read($, mode)) ?? '') ?? configured
+          if (current === 'hidden') {
+            const text = (blocks.get(c.index) ?? '') + c.text
+            blocks.set(c.index, text)
+            await showThought($, 'thinking', text, e.agentId)
+          } else {
+            yield c
+          }
         } else {
           yield c
         }
       }
     } finally {
       // 流中断时也保留已收到的思考；保存前再次检查模式。
-      if (current === 'hidden') await storeThoughts($, 'thinking', [...blocks.values()])
+      await storeThoughts($, 'thinking', [...blocks.values()])
     }
   })
 
   // 最后没有跟随工具调用的正文保留为回答；中断时也保留现有正文。
   on('turn.complete', async ($, e, next) => {
     stats.completes += 1
-    pending.delete(loopKey(e.agentId))
+    await releasePending($, loopKey(e.agentId))
+    // 子代理完成时只清理自己的预览，主回合结束则清理整个临时区域。
+    await update($, liveThought, (visible) =>
+      e.agentId === undefined || visible?.agentId === e.agentId ? null : visible)
     return next(e)
   })
 
   on('classic.SessionStart', async ($, e, next) => {
-    pending.clear()
+    await releasePending($)
+    await update($, liveThought, () => null)
     return next(e)
   })
 
@@ -551,8 +597,18 @@ export const register: Register = (on, options) => {
   })
 
   // Spinner：回合进行中的状态行（Swirling… (46s · ↓ 1.1k tokens)）
-  // 任何模式下都不隐藏——这是唯一能看到"还在干活"的地方
+  // 思考正文与原生状态行放在同一列，状态行始终在思考正文之后。
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    return next(e)
+    const current = parseMode((await read($, mode)) ?? '') ?? configured
+    const visible = await read($, liveThought)
+    const status = await next(e)
+    if (current !== 'hidden' || !visible) return status
+    const { Box, Text } = $.ui.resolve(e)
+    return <Box flexDirection="column" paddingLeft={0} marginTop={1}>
+      {visible.text.split('\n').map((line, index) =>
+        <Text key={String(index)} wrap="truncate-end" dimColor>{line || ' '}</Text>,
+      )}
+      {status}
+    </Box>
   })
 }

@@ -18,6 +18,12 @@ export interface StoredThought {
   text: string
 }
 
+export interface LiveThought {
+  agentId?: string
+  kind: 'thinking' | 'narration'
+  text: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'show-mode': {
@@ -25,6 +31,7 @@ declare module 'claude-code' {
       diffs: StoredDiff[]
       thoughts: StoredThought[]
       processRows: Record<string, boolean>
+      liveThought: LiveThought | null
     }
   }
 }
