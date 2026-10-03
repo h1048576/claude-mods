@@ -1,0 +1,15 @@
+{
+  "name": "show-mode",
+  "version": "0.3.0",
+  "description": "隐藏工具调用与思考/叙述痕迹，仅 hidden 模式保存文件 diff 与思考过程供回看：off/hidden 随时切换",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "显示模式",
+      "options": ["off", "hidden"],
+      "default": "hidden",
+      "description": "显示模式：off=正常显示且不新增记录, hidden=隐藏并保存文件 diff 与思考过程；最终回答和工具错误保留"
+    }
+  }
+}
