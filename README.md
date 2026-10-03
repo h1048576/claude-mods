@@ -7,6 +7,7 @@
 | 插件 | 版本 | 说明 |
 | --- | --- | --- |
 | [show-mode](./show-mode) | 0.3.0 | hidden 模式仅实时展示当前思考，隐藏工具调用与过程痕迹，保存文件 diff 与思考过程供回看 |
+| [shell-mode](./shell-mode) | 0.3.0 | 用 `/shell-mode` 切换 Bash 控制台，显示输出颜色，退出后将命令和结果保留在 CLI 中 |
 
 ## 环境要求
 
@@ -93,6 +94,56 @@ git clone <本仓库地址> ~/.claude/mods
 - 出错或被中断的工具调用在任何模式下都会照常显示，方便排查问题。
 - hidden 模式下思考正文与 Spinner 状态行显示在同一列，状态行始终位于思考正文之后。
 - 文件 diff 不依赖 Git，新文件、未暂存文件和非 Git 目录均可回看。
+
+### Shell Mode
+
+在项目目录启动 Claude Code 时加载插件：
+
+```powershell
+claude --plugin-dir "$env:USERPROFILE\.claude\mods\shell-mode"
+```
+
+先在 Claude Code 输入框中输入 `/shell-mode`，然后在打开的控制台 `$` 后输入命令：
+
+```text
+/shell-mode         # 未开启时进入 Bash 模式
+pwd
+ls
+cd internal
+git status
+/shell-mode         # 已开启时退出，返回正常 Claude 对话
+```
+
+进入后，控制台取得键盘焦点，在 `$` 后输入命令并回车。再次输入 `/shell-mode`、输入 `exit` 或按 Esc 关闭控制台，返回 Claude 对话。在 Claude 输入框和 Shell 控制台中输入 `/shell-mode` 都可以退出已开启的模式。`/shell-mode on` 和 `/shell-mode off` 仍可用于明确开启或关闭，无须强制指定参数。控制台位置由 Claude Code 决定：通常位于输入框上方，全屏且窗口足够宽时位于侧边。
+
+控制台直接显示命令和原始输出，不使用带插件名前缀的日志，也不触发 `Prompt dropped by a hook` 提示，不显示成功提示或退出码：
+
+```text
+$ ls
+config docs go.mod main.go
+
+$ git status
+On branch test
+nothing to commit, working tree clean
+
+$
+```
+
+每条命令由 Git Bash 直接执行，不主动启动模型回合。实际命令与输出保存在本地，CLI 的原生命令记录仅保存短引用，模型后续只能读取该引用。支持管道、重定向和连续 `cd`，后续命令沿用上次结束时的目录。退出后再次进入，从 Claude 会话目录开始。
+
+每条命令完成后增加一个空行，分隔相邻命令块。退出控制台时，把当前保留的命令和结果保存到 `%LOCALAPPDATA%/Claude/shell-mode/history/`，再通过 CLI 命令记录中的引用读取并渲染，继续显示在对话屏幕上，保留换行和颜色。通过 `/shell-mode`、`exit`、Esc 或窗格关闭按钮退出均会保留输出。重绘和插件重载时也从本地存档恢复；清理该目录会使对应的历史输出无法再次显示。
+
+保留 Claude 原生窗格的自动输入焦点。窗格的 × 和输入框的回车图标由 Claude 绘制，当前公开接口没有隐藏开关，因此这两个图标保留。
+
+直接显示的 `ls` 按控制台宽度多列排版；`ll` 等别名仍使用 Bash 配置。普通文件、目录、链接等颜色由 `ls` 和 `LS_COLORS` 确定。`git status`、`git diff` 等直接显示的 Git 输出启用 Git 自带的颜色；其他程序明确输出的 ANSI 颜色也会保留。不根据文件后缀或输出文字猜测颜色，没有颜色信息的内容保持默认颜色。显式 `ls -1`、`ls -l`、`ls --color=never` 等选项优先。管道、重定向、变量展开和复合命令不注入列格式或颜色，以免改变命令处理的数据。
+
+Windows 优先使用 `CLAUDE_CODE_GIT_BASH_PATH` 指定的 Bash，否则查找 Git for Windows 的常见安装目录，避免误用 WSL 的 `bash.exe`。
+
+每条命令使用登录 Bash 加载 `/etc/profile` 和个人登录配置，再开启 alias 展开，因此可以使用配置中的 `ll` 等别名。通常由 `~/.bash_profile` 加载 `~/.bashrc`。加载配置后恢复本次工作目录，保持连续 `cd` 的行为。
+
+每条命令使用独立 Bash 进程，执行结束后显示输出，最多运行十分钟。只保持工作目录，变量、函数等 Shell 状态不跨命令保持；交互式终端程序不适用。插件重载或会话切换后回到正常对话。
+
+命令输出保留原始换行，制表符转换为空格，ANSI 颜色转换为原生 Text 样式；光标移动等控制序列会移除。每次输出最多显示 50,000 字符、200 行，超过限制会显示截断提示。控制台历史最多保留最近 50,000 字符、200 行，并限制颜色片段数量，超出时删除最旧的内容；关闭时保存这部分输出，再释放控制台的临时历史。
 
 ## 开发
 

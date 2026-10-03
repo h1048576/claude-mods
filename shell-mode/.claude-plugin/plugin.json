@@ -1,0 +1,5 @@
+{
+  "name": "shell-mode",
+  "version": "0.3.0",
+  "description": "用 /shell-mode 切换 Bash 模式，连续执行命令并显示颜色，退出后将输出保留在 CLI 中"
+}
