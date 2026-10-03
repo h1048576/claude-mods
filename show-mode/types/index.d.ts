@@ -10,11 +10,11 @@ export interface StoredDiff {
   diff: string
 }
 
-// hidden 模式下保存的思考块和工具前的过程叙述。
+// hidden 模式下保存的思考、过程叙述，以及工具/技能调用。
 export interface StoredThought {
   id: number
   at: number
-  kind: 'thinking' | 'narration'
+  kind: 'thinking' | 'narration' | 'tool' | 'skill'
   text: string
 }
 

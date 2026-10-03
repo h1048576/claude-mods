@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, EngineInterface, ToolResultOf } from 'claude-code'
+import type { Register, EngineInterface, TextProps, ToolCallInput, ToolResultOf } from 'claude-code'
 
 import type { ShowMode, StoredDiff, StoredThought } from '../types'
 
@@ -20,6 +20,7 @@ const loopKey = (agentId?: string) => agentId ?? 'main'
 
 const DIFF_LIMIT = 50
 const THOUGHT_LIMIT = 50
+const THOUGHT_LINE_LIMIT = 5
 const ROW_LIMIT = 2000
 
 // 时:分:秒，记录的时间戳。
@@ -141,12 +142,83 @@ const storeDiffs = async ($: EngineInterface, entries: DiffEntry[]) => {
 const formatEntry = (entry: StoredDiff) =>
   `── code #${entry.id} ── ${stamp(entry.at)} ── ${entry.action === 'create' ? '新增' : '修改'} ── ${entry.tool}\n${entry.filePath}\n${entry.diff}`
 
+type DiffStyle = 'plain' | 'record' | 'file' | 'hunk' | 'added' | 'removed' | 'context'
+
+const DIFF_STYLES: Record<DiffStyle, TextProps> = {
+  plain: {},
+  record: { color: 'cyan', bold: true },
+  file: { color: 'yellow' },
+  hunk: { color: 'cyan' },
+  added: { color: 'green' },
+  removed: { color: 'red' },
+  context: { dimColor: true },
+}
+
+// 仅解析回看输出的副本，保存的 diff 保持纯文本。
+// hunk 内的 +++ / --- 也可能是代码内容，必须按增删行处理。
+const diffRuns = (text: string) => {
+  const runs: { style: DiffStyle; text: string }[] = []
+  let inHunk = false
+  let filePathNext = false
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    let style: DiffStyle = 'plain'
+    if (/^── code #\d+ ── /.test(line)) {
+      style = 'record'
+      inHunk = false
+      filePathNext = true
+    } else if (filePathNext) {
+      style = 'file'
+      filePathNext = false
+    } else if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)) {
+      style = 'hunk'
+      inHunk = true
+    } else if (inHunk) {
+      style = line.startsWith('+') ? 'added'
+        : line.startsWith('-') ? 'removed' : 'context'
+    } else if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      style = 'file'
+    }
+
+    // 相邻同样式的行合并，避免大 diff 为每行创建一个渲染节点。
+    const content = (index === 0 ? '' : '\n') + line
+    const previous = runs[runs.length - 1]
+    if (previous?.style === style) previous.text += content
+    else runs.push({ style, text: content })
+  }
+  return runs
+}
+
+// 标题另计；正文最多五行，省略提示也放在第五行内。
+const limitThought = (text: string) => {
+  const lines = text.replace(/\r\n?|\u2028|\u2029/g, '\n')
+    .replace(/^\n+|\n+$/g, '').split('\n')
+  if (lines.length <= THOUGHT_LINE_LIMIT) return lines.join('\n')
+  const kept = lines.slice(0, THOUGHT_LINE_LIMIT)
+  kept[THOUGHT_LINE_LIMIT - 1] += ' …（后续省略）'
+  return kept.join('\n')
+}
+
+const THOUGHT_LABEL: Record<StoredThought['kind'], string> = {
+  thinking: '思考',
+  narration: '过程叙述',
+  tool: '工具调用',
+  skill: '技能调用',
+}
+
+// tool.call 的参数与 tool 同级；所有工具（包括只读工具和 MCP）都归入 think。
+const formatToolCall = (e: ToolCallInput) => {
+  const args = Object.entries(e)
+    .filter(([key]) => !['tool', 'tool_use_id', 'agentId', 'consent'].includes(key))
+    .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+  return `${e.tool}\n${args.join('\n')}`
+}
+
 const storeThoughts = async (
   $: EngineInterface,
   kind: StoredThought['kind'],
   texts: string[],
 ) => {
-  const entries = texts.filter((text) => text.trim() !== '')
+  const entries = texts.filter((text) => text.trim() !== '').map(limitThought)
   if (entries.length === 0) return
   try {
     if ((parseMode((await read($, mode)) ?? '') ?? configured) !== 'hidden') return
@@ -164,7 +236,7 @@ const storeThoughts = async (
 }
 
 const formatThought = (entry: StoredThought) =>
-  `── think #${entry.id} ── ${stamp(entry.at)} ── ${entry.kind === 'thinking' ? '思考' : '过程叙述'}\n${entry.text}`
+  `── think #${entry.id} ── ${stamp(entry.at)} ── ${THOUGHT_LABEL[entry.kind]}\n${limitThought(entry.text)}`
 
 // /show-mode status 按需查看，避免在每个分片上弹 toast。
 const stats: {
@@ -233,8 +305,8 @@ export const register: Register = (on, options) => {
       const files = rest === 'think' ? [] : (await read($, diffs)) ?? []
       const thinking = rest === 'code' ? [] : (await read($, thoughts)) ?? []
       const records = [
-        ...files.map((entry) => ({ at: entry.at, text: formatEntry(entry) })),
-        ...thinking.map((entry) => ({ at: entry.at, text: formatThought(entry) })),
+        ...files.map((entry) => ({ kind: 'code', at: entry.at, text: formatEntry(entry) })),
+        ...thinking.map((entry) => ({ kind: 'think', at: entry.at, text: formatThought(entry) })),
       ].sort((a, b) => a.at - b.at)
       if (records.length === 0) {
         const label = rest === 'code' ? '文件更新 diff' : rest === 'think' ? '思考过程' : '文件更新或思考过程'
@@ -244,7 +316,11 @@ export const register: Register = (on, options) => {
         rest === 'think' ? '' : `文件更新 ${files.length} 条`,
         rest === 'code' ? '' : `思考过程 ${thinking.length} 条`,
       ].filter(Boolean).join('，')
-      return { text: `show-mode 保存的记录（${counts}）：\n\n${records.map((entry) => entry.text).join('\n\n')}` }
+      // 纯文本输出也保留块间空行：think 前一行，code 前两行。
+      const content = records.map((entry) =>
+        `${entry.kind === 'code' ? '\n\n\n' : '\n\n'}${entry.text.replace(/\n+$/, '')}`,
+      ).join('')
+      return { text: `show-mode 保存的记录（${counts}）：${content}` }
     }
 
     const current = parseMode((await read($, mode)) ?? '') ?? configured
@@ -272,6 +348,49 @@ export const register: Register = (on, options) => {
     return {
       text: `show-mode ${arg === 'status' ? '当前为' : '已切换为'} ${picked} (${MODE_LABEL[picked]})；已识别 ${Object.keys(rows).length} 条过程消息，已存文件 diff ${list.length} 条、思考过程 ${thinking.length} 条（/show-mode view 回看）；仅 hidden 模式新增记录\n诊断：start=${stats.starts} / append=${stats.appends} / tool=${stats.tools} / AssistantMessage=${stats.renders} / complete=${stats.completes}\nturn.step=${stats.fires} / 分片=${stats.chunks} (${kinds || '无'})`,
     }
+  })
+
+  // 三种 view 共用无缩进的布局，以显式行间距保留块间空白。
+  // 用原生 Text 着色；命令输出的存档和复制内容不包含 ANSI 控制字符。
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    const arg = e.props.args.trim().toLowerCase()
+    const isView = arg === 'view'
+      || (arg.startsWith('view ') && ['code', 'think'].includes(arg.slice(4).trim()))
+    if (e.props.command !== 'show-mode' || e.props.isErrored
+      || !isView
+      || !/(?:^|\n)── (?:code|think) #\d+ ── /.test(e.props.text)) return next(e)
+
+    // 每条记录分别渲染，思考正文中的 + / - 不参与 diff 着色。
+    const sections = e.props.text.replace(/\r\n/g, '\n').split(
+      /(?=^── (?:code|think) #\d+ ── \d{2}:\d{2}:\d{2} ── )/m,
+    )
+    const { Box, Text } = $.ui.resolve(e)
+    return <Box flexDirection="column" marginLeft={0} paddingLeft={0}>
+      {sections.map((value, index) => {
+        // 分隔空行交给 Box 的 marginTop，避免 Markdown 吞掉它们。
+        const section = value.replace(/\n+$/, '')
+        if (/^── code #\d+ ── /.test(section)) {
+          return <Box key={String(index)} flexDirection="column" marginTop={2} paddingLeft={0}>
+            <Text wrap="wrap">{diffRuns(section).map((run, runIndex) =>
+              <Text key={String(runIndex)} {...DIFF_STYLES[run.style]}>{run.text}</Text>,
+            )}</Text>
+          </Box>
+        }
+        if (/^── think #\d+ ── /.test(section)) {
+          const end = section.indexOf('\n')
+          const title = end === -1 ? section : section.slice(0, end)
+          const body = end === -1 ? '' : limitThought(section.slice(end + 1))
+          return <Box key={String(index)} flexDirection="column" marginTop={1} paddingLeft={0}>
+            <Text color="magenta" bold wrap="wrap">{title}</Text>
+            {body !== '' && body.split('\n').map((line, lineIndex) =>
+              // 每行单独截断，确保长参数/正文不会自动折成超过五行。
+              <Text key={String(lineIndex)} wrap="truncate-end" dimColor>{line || ' '}</Text>,
+            )}
+          </Box>
+        }
+        return <Text key={String(index)} wrap="wrap" dimColor>{section}</Text>
+      })}
+    </Box>
   })
 
   // 新回合不继承上一轮的候选正文，避免把上一轮最终回答隐藏掉。
@@ -311,6 +430,14 @@ export const register: Register = (on, options) => {
     stats.tools += 1
     const current = parseMode((await read($, mode)) ?? '') ?? configured
     await markProcess($, e.agentId)
+    if (current === 'hidden') {
+      try {
+        // 在执行前记录调用，保留嵌套技能/工具的发起顺序。
+        await storeThoughts($, e.tool === 'Skill' ? 'skill' : 'tool', [formatToolCall(e)])
+      } catch {
+        $.ui.log(`show-mode：无法记录 ${e.tool} 调用`, { to: 'debug' })
+      }
+    }
     const result = await next(e)
     if (current === 'hidden' && result.deny === undefined && !result.isError && !result.isReadOnly) {
       try {
