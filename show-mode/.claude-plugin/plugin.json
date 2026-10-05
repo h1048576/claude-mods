@@ -9,7 +9,7 @@
       "title": "Show Mode",
       "options": ["off", "hidden"],
       "default": "hidden",
-      "description": "显示模式：off=正常显示且不新增记录, hidden=仅展示当前思考，下一段替换、回合结束清理，并保存文件 diff 与思考过程；最终回答和工具错误保留"
+      "description": "显示模式：off=正常显示且不新增记录, hidden=仅展示当前思考，下一段替换、回合结束清理，并保存文件 diff 与思考过程；隐藏所有工具调用、结果和运行提示（含错误及中断），保留最终回答"
     }
   }
 }

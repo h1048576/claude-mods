@@ -295,10 +295,6 @@ const markProcess = async ($: EngineInterface, agentId?: string) => {
   await storeThoughts($, 'narration', [...rows.values()])
 }
 
-// 出错/被中断的调用在任何模式下照常显示。
-const keepRow = (e: { isErrored?: boolean; isInterrupted?: boolean }) =>
-  Boolean(e.isErrored || e.isInterrupted)
-
 // 清单配置的默认模式，register 时赋值
 let configured: ShowMode = 'hidden'
 
@@ -556,7 +552,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const current = parseMode((await read($, mode)) ?? '') ?? configured
 
-    if (current === 'off' || e.props.calls.some(keepRow)) {
+    if (current === 'off') {
       return next(e)
     }
 
@@ -573,24 +569,28 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
-    // 出错/被中断的调用豁免：照常显示
-    if (keepRow(e.props)) {
-      return next(e)
-    }
-
-    // hidden：不画
+    // hidden：成功、失败和被中断的调用都不画。
     const { Box } = $.ui.resolve(e)
     return <Box display="none" />
   })
 
   // ToolResult：结果块
-  // 错误结果保留，成功结果在 hidden 下隐藏。
+  // hidden 下隐藏所有结果，包括错误输出。
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const current = parseMode((await read($, mode)) ?? '') ?? configured
 
-    if (current === 'off' || e.props.isErrored) {
+    if (current === 'off') {
       return next(e)
     }
+
+    const { Box } = $.ui.resolve(e)
+    return <Box display="none" />
+  })
+
+  // ToolProgress：工具运行提示（ctrl+b to run in background）。
+  on('ui.render', { component: 'ToolProgress' }, async ($, e, next) => {
+    const current = parseMode((await read($, mode)) ?? '') ?? configured
+    if (current === 'off') return next(e)
 
     const { Box } = $.ui.resolve(e)
     return <Box display="none" />
