@@ -1,0 +1,5 @@
+{
+  "name": "codebuddy",
+  "version": "0.1.0",
+  "description": "读取本机 CodeBuddy 登录信息，在底部状态区域显示剩余积分、总积分和今日用量"
+}

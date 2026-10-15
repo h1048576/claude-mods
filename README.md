@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [show-mode](./show-mode) | 0.3.0 | hidden 模式仅实时展示当前思考，隐藏工具调用与过程痕迹，保存文件 diff 与思考过程供回看 |
 | [shell-mode](./shell-mode) | 0.3.0 | 用 `/shell-mode` 切换 Bash 控制台，显示输出颜色，退出后将命令和结果保留在 CLI 中 |
+| [codebuddy](./codebuddy) | 0.1.0 | 在底部状态区域展示 CodeBuddy 剩余积分、总积分和今日用量 |
 
 ## 环境要求
 
@@ -146,6 +147,26 @@ Windows 优先使用 `CLAUDE_CODE_GIT_BASH_PATH` 指定的 Bash，否则查找 G
 命令输出保留原始换行，制表符转换为空格，ANSI 颜色转换为原生 Text 样式；光标移动等控制序列会移除。每次输出最多显示 50,000 字符、200 行，超过限制会显示截断提示。控制台历史最多保留最近 50,000 字符、200 行，并限制颜色片段数量，超出时删除最旧的内容；关闭时保存这部分输出，再释放控制台的临时历史。
 
 ## 开发
+
+### CodeBuddy
+
+加载插件：
+
+```powershell
+claude --plugin-dir "$env:USERPROFILE\.claude\mods\codebuddy"
+```
+
+插件读取 `%USERPROFILE%\AppData\Local\CodeBuddyExtension\Data\Public\auth\Tencent-Cloud.coding-copilot.info` 的 `account.enterpriseId` 和 `auth.accessToken`，请求 CodeBuddy 企业用户积分及每日用量接口，将展示文字写入 `%USERPROFILE%/.claude/codebuddy/usage.json` 缓存，由现有 statusLine 脚本追加第二行 `token usage · today 90 · remain 3322/10000`，位于原状态行下方、权限提示上方，不带警告图标和插件名前缀。每日查询范围按 Asia/Taipei 时区动态生成当天的 `00:00:00` 至 `23:59:59`，分页参数为 `pageNum: 1`、`pageSize: 1`，today 和 remain 均去掉小数部分（不四舍五入），没有用量记录时显示 0。启动时自动查询，此后每分钟刷新，也可输入 `/codebuddy` 手动刷新。插件自身的重载成功提示在 InfoNotice 渲染时隐藏。
+
+每次刷新重新读取登录文件，登录信息更新后无需修改插件。文件缺失、登录失效或接口异常时，界面显示错误提示；不会保存令牌或输出原始响应。
+
+在现有 `~/.claude/statusline.sh` 的主状态行输出之后追加：
+
+```bash
+bash "${USERPROFILE:-$HOME}/.claude/mods/codebuddy/statusline.sh"
+```
+
+缓存只含展示文字和更新时间，缺失或超过三分钟未更新时显示 `--`。积分缓存每分钟刷新，界面在宿主下一次执行 statusLine 时更新。本机原脚本已备份为 `~/.claude/statusline.before-codebuddy.sh`。
 
 ```bash
 cd show-mode
